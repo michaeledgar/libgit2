@@ -1,0 +1,14 @@
+application: adgar-skyloft-3
+runtime: python27
+api_version: 1
+threadsafe: true
+version: 1
+
+handlers:
+- url: /
+  static_files: index.html
+  upload: index.html
+- url: /
+  static_files: testfile.txt
+  upload: testfile.txt
+
