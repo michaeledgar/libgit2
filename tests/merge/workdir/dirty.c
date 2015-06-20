@@ -227,6 +227,7 @@ static int merge_differently_filtered_files(char *files[])
 	git_reference *head;
 	git_object *head_object;
 	int error;
+	struct timeval times[2];
 
 	cl_git_pass(git_repository_head(&head, repo));
 	cl_git_pass(git_reference_peel(&head_object, head, GIT_OBJ_COMMIT));
@@ -245,8 +246,33 @@ static int merge_differently_filtered_files(char *files[])
 	write_files(files);
 	hack_index(files);
 
-	repo_index->stamp.mtime = time(NULL) + 1;
+	/*
+	 * This update stops us from detecting that we have a
+	 * different file on the worktree than in the index entry,
+	 * which would normally cause us to smduge the size, forcing
+	 * the next comparison to load the file and detect that we do
+	 * have a different file than we should.
+	 */
+	repo_index->stamp.mtime += 5;
 	cl_git_pass(git_index_write(repo_index));
+
+	/*
+	 * This update stops a reload of the index to make the
+	 * timestamp go backwards and make it match the mtime of the
+	 * entries. The index having the same or an earlier timestamp
+	 * than an entry forces us to look at the file, which would
+	 * detect a change.
+	 *
+	 * Again, we want to simulate a situation in which we don't
+	 * look at the file and instead trust that it hasn't changed
+	 * since the update.
+	 */
+	times[0].tv_sec = repo_index->stamp.mtime + 5;
+	times[0].tv_usec = 0;
+	times[1].tv_sec = repo_index->stamp.mtime + 5;
+	times[1].tv_usec = 0;
+	cl_git_pass(p_utimes(git_index_path(repo_index), times));
+	cl_git_pass(git_index_read(repo_index, true));
 
 	error = merge_branch();
 
