@@ -98,3 +98,37 @@ void test_diff_racy__write_index_just_after_file(void)
 	git_diff_free(diff);
 	git_index_free(index);
 }
+
+void test_diff_racy__smudge_when_stat_matches(void)
+{
+	git_index *index;
+	git_diff *diff;
+	git_buf path = GIT_BUF_INIT;
+
+	/* Make sure we exist on disk */
+	cl_git_pass(git_repository_index(&index, g_repo));
+	cl_git_pass(git_index_write(index));
+
+	/* Add it first */
+	cl_git_pass(git_buf_joinpath(&path, git_repository_workdir(g_repo), "A"));
+	cl_git_mkfile(path.ptr, "A");
+	cl_git_pass(git_index_add_bypath(index, "A"));
+	/* Make it executable, so mode doesn't match */
+	cl_git_pass(p_chmod(path.ptr, 0766));
+	/* Make sure we detect a racy timestamp in this entry */
+	index->stamp.mtime = git_index_get_bypath(index, "A", 0)->mtime.seconds;
+	cl_git_pass(git_index_write(index));
+
+	/*
+	 * We have a file with the same timestamp as the index, but
+	 * the file on the disk has a different mode, so we don't need
+	 * to smudge it.
+	 */
+	cl_assert_equal_i(1, git_index_get_bypath(index, "A", 0)->file_size);
+	cl_git_pass(git_diff_index_to_workdir(&diff, g_repo, index, NULL));
+	cl_assert_equal_i(1, git_diff_num_deltas(diff));
+
+	git_buf_free(&path);
+	git_diff_free(diff);
+	git_index_free(index);
+}

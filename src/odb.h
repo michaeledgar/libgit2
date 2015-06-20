@@ -100,4 +100,6 @@ int git_odb__read_header_or_object(
 /* fully free the object; internal method, DO NOT EXPORT */
 void git_odb_object__free(void *object);
 
+git_oid git__empty_blob;
+
 #endif

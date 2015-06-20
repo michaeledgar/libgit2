@@ -672,6 +672,64 @@ static bool is_racy_timestamp(git_time_t stamp, git_index_entry *entry)
 	return ((int32_t) stamp) <= entry->mtime.seconds;
 }
 
+/* Returns whether  */
+static int match_stat_data(const git_index_entry *entry, struct stat *st, bool trust_ctime)
+{
+	return (entry->mtime.seconds != (int32_t) st->st_mtime) ||
+		(trust_ctime && entry->ctime.seconds != (int32_t) st->st_ctime) ||
+		/* TODO: uid, gid and ino should be controlled by core.checkstat */
+		(entry->uid != st->st_uid) ||
+		(entry->gid != st->st_gid) ||
+		(entry->ino != st->st_ino) ||
+		(entry->file_size != (uint32_t) st->st_size);
+}
+
+static int index_entry_match_basic(const git_index_entry *entry, struct stat *st,
+                                   int caps, bool trust_ctime)
+{
+        bool trust_mode    = !(caps & GIT_INDEXCAP_NO_FILEMODE);
+        bool have_symlinks = !(caps & GIT_INDEXCAP_NO_SYMLINKS);
+
+        switch (entry->mode & S_IFMT) {
+        case S_IFREG:
+                if (!S_ISREG(st->st_mode))
+			return 1;
+
+                /* Limit exec-bit changes to the user's  */
+                if (trust_mode && GIT_PERMS_IS_UEXEC(entry->mode ^ st->st_mode))
+			return 1;
+                break;
+        case S_IFLNK:
+                if (!S_ISLNK(st->st_mode) && (have_symlinks || !S_ISREG(st->st_mode)))
+			return 1;
+                break;
+        case S_IFGITLINK:
+                if (!S_ISDIR(st->st_mode))
+			return 1;
+                /*
+                 * Note that git uses compare_gitlink() here in order
+                 * to figure out if the submodule changed. We only
+                 * call this for smudging racily clean entries, which
+                 * is not something we do to links anyhow, so we don't
+                 * have to do it.
+                 */
+                return 1;
+        default:
+                giterr_set(GITERR_INDEX, "bad index entry mode %o", entry->mode);
+                return -1;
+
+        }
+
+        if (match_stat_data(entry, st, trust_ctime) != 0)
+		return 1;
+
+        /* Detect racily smudged entry */
+        if (entry->file_size == 0 && !git_oid_equal(&git__empty_blob, &entry->id))
+		return 1;
+
+        return 0;
+}
+
 /*
  * Force the next diff to take a look at those entries which have the
  * same timestamp as the current index.
@@ -679,30 +737,44 @@ static bool is_racy_timestamp(git_time_t stamp, git_index_entry *entry)
 static int truncate_racily_clean(git_index *index)
 {
 	size_t i;
-	int error;
+	int error, trust_ctime = 1;
 	git_index_entry *entry;
 	git_time_t ts = index->stamp.mtime;
 	git_diff_options diff_opts = GIT_DIFF_OPTIONS_INIT;
 	git_diff *diff;
+	const char *workdir;
+	git_buf path = GIT_BUF_INIT;
+	struct stat st;
+	int caps = git_index_caps(index);
 
 	/* Nothing to do if there's no repo to talk about */
 	if (!INDEX_OWNER(index))
 		return 0;
 
 	/* If there's no workdir, we can't know where to even check */
-	if (!git_repository_workdir(INDEX_OWNER(index)))
+	if ((workdir = git_repository_workdir(INDEX_OWNER(index))) == NULL)
 		return 0;
+
+	git_repository__cvar(&trust_ctime, INDEX_OWNER(index), GIT_CVAR_TRUSTCTIME);
 
 	diff_opts.flags |= GIT_DIFF_INCLUDE_TYPECHANGE | GIT_DIFF_IGNORE_SUBMODULES | GIT_DIFF_DISABLE_PATHSPEC_MATCH;
 	git_vector_foreach(&index->entries, i, entry) {
 		if (!is_racy_timestamp(ts, entry))
 			continue;
 
+		git_buf_clear(&path);
+		if ((error = git_buf_joinpath(&path, workdir, entry->path)) < 0)
+			goto out;
+
+		if (!p_stat(path.ptr, &st) &&
+		    index_entry_match_basic(entry, &st, caps, trust_ctime) == 1)
+			continue;
+
 		diff_opts.pathspec.count = 1;
 		diff_opts.pathspec.strings = (char **) &entry->path;
 
 		if ((error = git_diff_index_to_workdir(&diff, INDEX_OWNER(index), index, &diff_opts)) < 0)
-			return error;
+			goto out;
 
 		if (git_diff_num_deltas(diff) > 0)
 			entry->file_size = 0;
@@ -710,7 +782,9 @@ static int truncate_racily_clean(git_index *index)
 		git_diff_free(diff);
 	}
 
-	return 0;
+out:
+	git_buf_free(&path);
+	return error;
 }
 
 int git_index_write(git_index *index)
